@@ -1,49 +1,110 @@
-import asyncio
-import random
-import websockets
+import socket
+import threading
+import json
+import time
+from typing import List, Dict, Optional
 
-PEER_DISCOVERY_INTERVAL = 60  # Seconds between peer discovery attempts
-PEER_CONNECT_TIMEOUT = 10  # Seconds to wait for peer connection
-
-class PeerNetwork:
-    def __init__(self, data_marketplace):
-        self.data_marketplace = data_marketplace
-        self.peers = []
+class P2PNetwork:
+    def __init__(self, port: int = 8000):
+        self.port = port
+        self.peers: Dict[str, float] = {}  # peer_address -> last_seen timestamp
         self.running = False
-
-    async def start(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(('0.0.0.0', port))
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        
+    def start(self):
+        """Start the P2P network node"""
         self.running = True
-        await self.discover_peers()
-        await self.maintain_connections()
+        self.discovery_thread = threading.Thread(target=self._discover_peers)
+        self.listen_thread = threading.Thread(target=self._listen)
+        self.maintenance_thread = threading.Thread(target=self._maintain_peers)
+        
+        self.discovery_thread.start()
+        self.listen_thread.start()
+        self.maintenance_thread.start()
 
-    async def stop(self):
+    def stop(self):
+        """Stop the P2P network node"""
         self.running = False
-        await asyncio.gather(*[peer.close() for peer in self.peers])
-
-    async def discover_peers(self):
+        self.sock.close()
+        
+    def _discover_peers(self):
+        """Periodically broadcast discovery messages"""
         while self.running:
             try:
-                # Connect to known bootstrap nodes to discover more peers
-                async with websockets.connect('ws://bootstrap1.decentralized-data-marketplace.com') as ws:
-                    await ws.send(f'DISCOVER {self.data_marketplace.node_id}')
-                    peers = await ws.recv()
-                    self.peers.extend(peers.split(','))
-            except Exception as e:
-                print(f'Error discovering peers: {e}')
-            await asyncio.sleep(PEER_DISCOVERY_INTERVAL)
+                discovery_msg = {
+                    'type': 'DISCOVERY',
+                    'port': self.port,
+                    'timestamp': time.time()
+                }
+                self.sock.sendto(json.dumps(discovery_msg).encode(), 
+                               ('<broadcast>', self.port))
+                time.sleep(10)  # Discovery interval
+            except:
+                continue
 
-    async def maintain_connections(self):
+    def _listen(self):
+        """Listen for incoming peer messages"""
         while self.running:
-            # Randomly connect to a few peers to maintain the network
-            for _ in range(3):
-                if self.peers:
-                    peer = random.choice(self.peers)
-                    try:
-                        async with websockets.connect(f'ws://{peer}') as ws:
-                            await ws.send(f'CONNECT {self.data_marketplace.node_id}')
-                            # Perform handshake and add peer to active connections
-                            self.peers.append(peer)
-                    except Exception as e:
-                        print(f'Error connecting to peer {peer}: {e}')
-                        self.peers.remove(peer)
-            await asyncio.sleep(PEER_CONNECT_TIMEOUT)
+            try:
+                data, addr = self.sock.recvfrom(1024)
+                msg = json.loads(data.decode())
+                
+                if msg['type'] == 'DISCOVERY':
+                    peer_addr = f'{addr[0]}:{msg["port"]}'
+                    self.peers[peer_addr] = msg['timestamp']
+                    
+                    # Send acknowledgment
+                    ack_msg = {
+                        'type': 'ACK',
+                        'port': self.port,
+                        'timestamp': time.time()
+                    }
+                    self.sock.sendto(json.dumps(ack_msg).encode(), addr)
+                    
+                elif msg['type'] == 'ACK':
+                    peer_addr = f'{addr[0]}:{msg["port"]}'
+                    self.peers[peer_addr] = msg['timestamp']
+                    
+            except:
+                continue
+
+    def _maintain_peers(self):
+        """Remove stale peers"""
+        while self.running:
+            try:
+                current_time = time.time()
+                stale_peers = [
+                    addr for addr, last_seen in self.peers.items()
+                    if current_time - last_seen > 30  # 30 second timeout
+                ]
+                for peer in stale_peers:
+                    del self.peers[peer]
+                time.sleep(5)
+            except:
+                continue
+
+    def get_active_peers(self) -> List[str]:
+        """Get list of currently active peers"""
+        return list(self.peers.keys())
+
+    def broadcast_message(self, message: dict):
+        """Broadcast a message to all peers"""
+        for peer in self.peers:
+            try:
+                host, port = peer.split(':')
+                self.sock.sendto(json.dumps(message).encode(), 
+                               (host, int(port)))
+            except:
+                continue
+
+    def send_to_peer(self, peer: str, message: dict) -> bool:
+        """Send a message to a specific peer"""
+        try:
+            host, port = peer.split(':')
+            self.sock.sendto(json.dumps(message).encode(), 
+                           (host, int(port)))
+            return True
+        except:
+            return False
