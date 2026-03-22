@@ -1,109 +1,103 @@
 import asyncio
-import json
-from typing import Dict, Set, Optional
+from typing import Dict, List, Set
+from kademlia.network import Server
 from dataclasses import dataclass
-import websockets
+import json
+import time
 
 @dataclass
-class Node:
-    id: str
-    address: str
-    capabilities: Set[str]
+class PeerInfo:
+    node_id: str
+    ip: str
+    port: int
     last_seen: float
+    capabilities: List[str]
 
-class SwarmNetwork:
-    def __init__(self, host: str = '0.0.0.0', port: int = 8765):
-        self.host = host
-        self.port = port
-        self.nodes: Dict[str, Node] = {}
+class DecentralizedNetwork:
+    def __init__(self, bootstrap_nodes=None):
+        self.server = Server()
+        self.bootstrap_nodes = bootstrap_nodes or []
+        self.peers: Dict[str, PeerInfo] = {}
         self.node_id = None
-        self.capabilities = set()
-        self.running = False
+        self._shutdown = False
 
-    async def start(self, node_id: str, capabilities: Set[str]):
-        self.node_id = node_id
-        self.capabilities = capabilities
-        self.running = True
+    async def start(self, port: int):
+        """Start the network node and connect to bootstrap peers"""
+        await self.server.listen(port)
+        self.node_id = self.server.node.long_id
         
-        server = await websockets.serve(
-            self.handle_connection, self.host, self.port
-        )
-        await self.discover_nodes()
-        await server.wait_closed()
-
-    async def discover_nodes(self):
-        """Actively discover other nodes in the network"""
-        while self.running:
-            try:
-                # Broadcast presence to known nodes
-                for node in list(self.nodes.values()):
-                    try:
-                        async with websockets.connect(node.address) as ws:
-                            await ws.send(json.dumps({
-                                'type': 'discovery',
-                                'node_id': self.node_id,
-                                'capabilities': list(self.capabilities),
-                                'address': f'ws://{self.host}:{self.port}'
-                            }))
-                    except:
-                        # Remove stale nodes
-                        del self.nodes[node.id]
-                
-                await asyncio.sleep(30)  # Discovery interval
-            except Exception as e:
-                print(f'Discovery error: {e}')
-                await asyncio.sleep(5)
-
-    async def handle_connection(self, websocket, path):
-        """Handle incoming connections and messages"""
-        try:
-            async for message in websocket:
-                data = json.loads(message)
-                
-                if data['type'] == 'discovery':
-                    # Register new node
-                    self.nodes[data['node_id']] = Node(
-                        id=data['node_id'],
-                        address=data['address'], 
-                        capabilities=set(data['capabilities']),
-                        last_seen=asyncio.get_event_loop().time()
-                    )
-                    
-                    # Reply with our info
-                    await websocket.send(json.dumps({
-                        'type': 'discovery',
-                        'node_id': self.node_id,
-                        'capabilities': list(self.capabilities),
-                        'address': f'ws://{self.host}:{self.port}'
-                    }))
-                    
-                elif data['type'] == 'message':
-                    # Handle regular messages
-                    print(f'Received message from {data["source"]}: {data["content"]}')
-
-        except Exception as e:
-            print(f'Connection handler error: {e}')
-
-    async def broadcast(self, message: str):
-        """Broadcast message to all connected nodes"""
-        for node in self.nodes.values():
-            try:
-                async with websockets.connect(node.address) as ws:
-                    await ws.send(json.dumps({
-                        'type': 'message',
-                        'source': self.node_id,
-                        'content': message
-                    }))
-            except Exception as e:
-                print(f'Broadcast error to {node.id}: {e}')
-
-    def get_nodes_with_capability(self, capability: str) -> Set[Node]:
-        """Find nodes that have a specific capability"""
-        return {node for node in self.nodes.values() 
-                if capability in node.capabilities}
+        if self.bootstrap_nodes:
+            await self.server.bootstrap(self.bootstrap_nodes)
+        
+        asyncio.create_task(self._periodic_peer_discovery())
 
     async def stop(self):
-        """Gracefully shutdown the network"""
-        self.running = False
-        # Notify other nodes
-        await self.broadcast('Node disconnecting')
+        """Gracefully shutdown the network node"""
+        self._shutdown = True
+        await self.server.stop()
+
+    async def _periodic_peer_discovery(self):
+        """Continuously discover and maintain peer connections"""
+        while not self._shutdown:
+            try:
+                # Discover new peers
+                peers_data = await self.server.get('peers')
+                if peers_data:
+                    discovered = json.loads(peers_data)
+                    self._update_peers(discovered)
+
+                # Advertise self
+                self_info = PeerInfo(
+                    node_id=str(self.node_id),
+                    ip='127.0.0.1',  # TODO: Get actual public IP
+                    port=self.server.port,
+                    last_seen=time.time(),
+                    capabilities=['data_exchange', 'storage']
+                )
+                
+                current_peers = {**self.peers}
+                current_peers[str(self.node_id)] = self_info
+                await self.server.set('peers', json.dumps(current_peers))
+
+                # Prune stale peers
+                self._prune_stale_peers()
+
+            except Exception as e:
+                print(f"Peer discovery error: {e}")
+
+            await asyncio.sleep(60)  # Run discovery every minute
+
+    def _update_peers(self, discovered_peers: Dict):
+        """Update local peer registry with discovered peers"""
+        for peer_id, peer_data in discovered_peers.items():
+            if peer_id not in self.peers:
+                self.peers[peer_id] = PeerInfo(**peer_data)
+            else:
+                # Update last_seen for existing peers
+                self.peers[peer_id].last_seen = time.time()
+
+    def _prune_stale_peers(self, max_age: int = 300):
+        """Remove peers that haven't been seen for max_age seconds"""
+        current_time = time.time()
+        stale_peers = [
+            peer_id for peer_id, peer in self.peers.items()
+            if current_time - peer.last_seen > max_age
+        ]
+        for peer_id in stale_peers:
+            del self.peers[peer_id]
+
+    async def broadcast(self, message: str):
+        """Broadcast a message to all connected peers"""
+        for peer in self.peers.values():
+            try:
+                await self.server.set(f"msg:{peer.node_id}", message)
+            except Exception as e:
+                print(f"Failed to broadcast to {peer.node_id}: {e}")
+
+    async def get_network_size(self) -> int:
+        """Get the current number of active peers"""
+        return len(self.peers) + 1  # Include self
+
+    def get_active_peers(self) -> List[PeerInfo]:
+        """Get list of currently active peers"""
+        return list(self.peers.values())
