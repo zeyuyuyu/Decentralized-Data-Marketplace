@@ -1,56 +1,28 @@
+import asyncio
+import logging
 import random
-import time
-import requests
 
-class DataScrapingSwarm:
-    def __init__(self, seed_urls, num_agents):
-        self.seed_urls = seed_urls
+class ScrapingSwarm:
+    def __init__(self, num_agents, target_urls):
         self.num_agents = num_agents
-        self.agents = [DataScrapingAgent(self) for _ in range(num_agents)]
+        self.target_urls = target_urls
+        self.agents = [ScrapeAgent(self) for _ in range(num_agents)]
 
-    def start(self):
-        for agent in self.agents:
-            agent.start()
+    async def run(self):
+        await asyncio.gather(*[agent.run() for agent in self.agents])
 
-    def stop(self):
-        for agent in self.agents:
-            agent.stop()
-
-class DataScrapingAgent:
+class ScrapeAgent:
     def __init__(self, swarm):
         self.swarm = swarm
-        self.current_url = random.choice(swarm.seed_urls)
-        self.running = False
 
-    def start(self):
-        self.running = True
-        while self.running:
-            try:
-                response = requests.get(self.current_url)
-                data = response.text
-                # Process the data
-                print(f"Scraped data from: {self.current_url}")
-                # Find new URLs to explore
-                new_urls = self._find_new_urls(data)
-                if new_urls:
-                    self.current_url = random.choice(new_urls)
-                else:
-                    self.current_url = random.choice(self.swarm.seed_urls)
-                time.sleep(random.uniform(1, 5))
-            except Exception as e:
-                print(f"Error scraping {self.current_url}: {e}")
-                self.current_url = random.choice(self.swarm.seed_urls)
-
-    def stop(self):
-        self.running = False
-
-    def _find_new_urls(self, data):
-        # Implement your URL extraction logic here
-        return []
+    async def run(self):
+        while True:
+            target_url = random.choice(self.swarm.target_urls)
+            logging.info(f"Scraping data from: {target_url}")
+            # Implement scraping logic here
+            await asyncio.sleep(random.uniform(1, 5))
 
 if __name__ == "__main__":
-    seed_urls = ["https://example.com", "https://another-example.com"]
-    swarm = DataScrapingSwarm(seed_urls, 10)
-    swarm.start()
-    time.sleep(60)  # Run the swarm for 1 minute
-    swarm.stop()
+    logging.basicConfig(level=logging.INFO)
+    swarm = ScrapingSwarm(num_agents=10, target_urls=["https://example.com", "https://another-example.com"])
+    asyncio.run(swarm.run())
