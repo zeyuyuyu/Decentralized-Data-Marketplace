@@ -1,35 +1,56 @@
-import blockchain
-import data_exchange
+import asyncio
+import ipfs
+import web3
 
-class DataMarketplace:
-    def __init__(self):
-        self.blockchain = blockchain.Blockchain()
-        self.data_exchange = data_exchange.DataExchange()
+class DataRouter:
+    def __init__(self, ipfs_node, ethereum_node):
+        self.ipfs = ipfs_node
+        self.ethereum = ethereum_node
 
-    def buy_data(self, buyer, seller, data_id, price):
-        # Verify buyer has enough funds
-        if buyer.balance < price:
-            return False
+    async def store_data(self, data):
+        # Store data on IPFS
+        cid = await self.ipfs.add_data(data)
 
-        # Execute data purchase transaction on blockchain
-        transaction = self.blockchain.create_transaction(buyer, seller, data_id, price)
-        self.blockchain.add_transaction(transaction)
+        # Create a smart contract to represent the data
+        contract = await self.ethereum.deploy_data_contract(cid)
 
-        # Transfer data from seller to buyer
-        self.data_exchange.transfer_data(seller, buyer, data_id)
+        return contract.address
 
-        # Update balances
-        buyer.balance -= price
-        seller.balance += price
+    async def retrieve_data(self, contract_address):
+        # Fetch the IPFS CID from the smart contract
+        contract = await self.ethereum.get_data_contract(contract_address)
+        cid = await contract.get_cid()
 
-        return True
+        # Fetch the data from IPFS
+        data = await self.ipfs.get_data(cid)
 
-    def sell_data(self, seller, data_id, price):
-        # Add data to data exchange
-        self.data_exchange.add_data(seller, data_id, price)
+        return data
 
-        # Create listing on blockchain
-        listing = self.blockchain.create_data_listing(seller, data_id, price)
-        self.blockchain.add_listing(listing)
+class IPFSNode:
+    def __init__(self, gateway_url):
+        self.gateway = gateway_url
 
-        return True
+    async def add_data(self, data):
+        # Upload data to IPFS and return the CID
+        cid = await self.gateway.add_data(data)
+        return cid
+
+    async def get_data(self, cid):
+        # Fetch data from IPFS using the CID
+        data = await self.gateway.get_data(cid)
+        return data
+
+class EthereumNode:
+    def __init__(self, provider_url, contract_abi):
+        self.provider = provider_url
+        self.abi = contract_abi
+
+    async def deploy_data_contract(self, cid):
+        # Deploy a new smart contract to represent the data
+        contract = await self.provider.deploy_contract(self.abi, cid)
+        return contract
+
+    async def get_data_contract(self, address):
+        # Fetch an existing data contract by its address
+        contract = await self.provider.get_contract(self.abi, address)
+        return contract
